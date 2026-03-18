@@ -157,12 +157,12 @@ progress_store = {}
 s3 = boto3.client("s3", region_name="eu-north-1")
 BUCKET_NAME = "pdf-translator-storage"
 
-# CORS — restrict to allowed origin from environment
+# CORS config
 _allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[_allowed_origin] if _allowed_origin != "*" else ["*"],
-    allow_credentials=True,
+    allow_credentials=True if _allowed_origin != "*" else False, # credentials=True is incompatible with origin="*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -176,15 +176,13 @@ if os.path.isdir("frontend"):
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/frontend/login.html")
+    return {"message": "PDF Translator API Running"}
 
 # ---------------------------
 # Home Route
 # ---------------------------
 
-@app.get("/")
-def home():
-    return {"message": "PDF Translator API Running"}
+# Duplicate home() route removed
 
 # ---------------------------
 # WebSocket Progress Endpoint
