@@ -11,6 +11,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap"
     rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
   <style>
     .pw-toggle {
       position: relative;
@@ -255,9 +256,7 @@
   </div>
 
   <script>
-    const API = (window.location.origin && window.location.origin !== 'null')
-      ? window.location.origin
-      : 'http://127.0.0.1:8000';
+    const API = window.API_CONFIG.API_URL;
     /* ── Tab switch ── */
     function switchTab(tab) {
       ['login', 'register'].forEach(t => {

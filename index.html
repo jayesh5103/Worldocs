@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
   <style>
     .lang-row {
       display: flex;
@@ -191,9 +192,7 @@
   </div>
 
   <script>
-    const API = (window.location.origin && window.location.origin !== 'null')
-      ? window.location.origin
-      : 'http://127.0.0.1:8000';
+    const API = window.API_CONFIG.API_URL;
     function checkAuth() {
       const token = localStorage.getItem('access_token');
       if (!token) window.location.href = 'login.html';
@@ -277,8 +276,7 @@
 
         btn.textContent = '\ud83d\udd04 Translating\u2026';
 
-        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const socket = new WebSocket(`${wsProto}//${window.location.host}/progress/${taskId}`);
+        const socket = new WebSocket(`${window.API_CONFIG.WS_URL}/progress/${taskId}`);
         socket.onmessage = function (event) {
           const msg = JSON.parse(event.data);
           if (msg.progress < 0) {
