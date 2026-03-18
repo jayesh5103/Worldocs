@@ -9,8 +9,8 @@
 
 const CONFIG = {
     // REPLACE THIS URL with your deployed backend URL from Render
-    API_BASE_URL: "https://your-backend-name.onrender.com",
-    
+    API_BASE_URL: "https://worldocs.onrender.com",
+
     // Automatically use localhost if running locally
     get API_URL() {
         if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
