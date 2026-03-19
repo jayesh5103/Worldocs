@@ -10,6 +10,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
   <script src="config.js"></script>
+  <script>
+    if (!localStorage.getItem('access_token')) {
+      window.location.href = 'login.html';
+    }
+  </script>
   <style>
     .lang-row {
       display: flex;
@@ -193,16 +198,11 @@
 
   <script>
     const API = window.API_CONFIG.API_URL;
-    function checkAuth() {
-      const token = localStorage.getItem('access_token');
-      if (!token) window.location.href = 'login.html';
-      return token;
-    }
+    const userToken = localStorage.getItem('access_token');
     function logout() {
       localStorage.removeItem('access_token');
       window.location.href = 'login.html';
     }
-    const userToken = checkAuth();
 
     const dropArea     = document.getElementById('dropArea');
     const fileInput    = document.getElementById('pdfFile');

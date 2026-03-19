@@ -256,6 +256,9 @@
   </div>
 
   <script>
+    if (localStorage.getItem('access_token')) {
+      window.location.href = 'index.html';
+    }
     const API = window.API_CONFIG.API_URL;
     /* ── Tab switch ── */
     function switchTab(tab) {

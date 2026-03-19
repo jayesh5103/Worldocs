@@ -158,25 +158,17 @@ s3 = boto3.client("s3", region_name="eu-north-1")
 BUCKET_NAME = "pdf-translator-storage"
 
 # CORS config
-_allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
+# On Render, set ALLOWED_ORIGIN to your GitHub Pages URL (e.g., https://jayesh5103.github.io)
+_allowed_origins = os.environ.get("ALLOWED_ORIGIN", "*").split(",")
+_allowed_origins = [o.strip() for o in _allowed_origins if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_allowed_origin] if _allowed_origin != "*" else ["*"],
-    allow_credentials=True if _allowed_origin != "*" else False, # credentials=True is incompatible with origin="*"
+    allow_origins=_allowed_origins,
+    allow_credentials=True if "*" not in _allowed_origins else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── Serve frontend static files ───────────────────────────────────────────────
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
-
-if os.path.isdir("frontend"):
-    app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
-
-@app.get("/", include_in_schema=False)
-def root():
-    return {"message": "PDF Translator API Running"}
 
 # ---------------------------
 # Home Route
@@ -671,3 +663,48 @@ async def translate_pdf(
         "task_id": task_id,
         "download_url": file_url
     }
+
+# ── Serve frontend static files (at the end to avoid shadowing API) ───────────
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, RedirectResponse
+
+# Serve specific HTML files from root for easier deployment
+@app.get("/", include_in_schema=False)
+async def serve_root():
+    if os.path.exists("login.html"):
+        return FileResponse("login.html")
+    return {"message": "Worldocs API Running"}
+
+@app.get("/index", include_in_schema=False)
+async def index_redirect():
+    return RedirectResponse(url="/index.html")
+
+@app.get("/login", include_in_schema=False)
+async def login_redirect():
+    return RedirectResponse(url="/login.html")
+
+@app.get("/dashboard", include_in_schema=False)
+async def dashboard_redirect():
+    return RedirectResponse(url="/dashboard.html")
+
+@app.get("/{filename}", include_in_schema=False)
+async def serve_static_root(filename: str):
+    # List of allowed static file extensions
+    allowed_extensions = {".css", ".js", ".ttf", ".png", ".jpg", ".jpeg", ".svg", ".pdf", ".ico"}
+    _, ext = os.path.splitext(filename)
+    
+    if ext.lower() in allowed_extensions:
+        if os.path.exists(filename):
+            return FileResponse(filename)
+            
+    # Also handle .html if requested explicitly or without extension
+    if filename.endswith(".html") or not ext:
+        html_path = filename if filename.endswith(".html") else f"{filename}.html"
+        if os.path.exists(html_path):
+            return FileResponse(html_path)
+        
+    raise HTTPException(status_code=404)
+
+# If the user has a 'frontend' directory, mount it.
+if os.path.isdir("frontend"):
+    app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
