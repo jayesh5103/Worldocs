@@ -6,12 +6,15 @@ from slowapi.errors import RateLimitExceeded
 from pypdf import PdfReader
 from deep_translator import GoogleTranslator
 from fpdf import FPDF
+from fpdf.errors import FPDFUnicodeEncodingException
 import fitz  # used for pdf-to-image conversion and page count if needed (wait, pdfplumber does that)
+
 import tempfile
 import boto3
 import uuid
 import asyncio
 import os
+import re
 
 # ── Script-aware font registry ────────────────────────────────────────────────
 # Maps script name → PyMuPDF font filename/name
@@ -28,6 +31,7 @@ _FONT_FILES = {
     "Malayalam":  "NotoSansMalayalam-Regular.ttf",    # ml
     "Arabic":     "NotoSansArabic-Regular.ttf",       # ar, ur
     "Cyrillic":   "NotoSans-Regular.ttf",             # ru
+    "Regular":    "NotoSans-Regular.ttf",             # Generic Unicode fallback
 }
 
 def _register_fonts_startup():
@@ -52,53 +56,65 @@ def _register_fonts_startup():
 _register_fonts_startup()
 
 
+def _font_for(ch: str, fallback_font: str = "helv") -> str:
+    cp = ord(ch)
+    if 0x0900 <= cp <= 0x097F or 0xA8E0 <= cp <= 0xA8FF:
+        return SCRIPT_FONTS.get("Devanagari", fallback_font)
+    if 0x0980 <= cp <= 0x09FF:
+        return SCRIPT_FONTS.get("Bengali", fallback_font)
+    if 0x0A00 <= cp <= 0x0A7F:
+        return SCRIPT_FONTS.get("Gurmukhi", fallback_font)
+    if 0x0A80 <= cp <= 0x0AFF:
+        return SCRIPT_FONTS.get("Gujarati", fallback_font)
+    if 0x0B80 <= cp <= 0x0BFF:
+        return SCRIPT_FONTS.get("Tamil", fallback_font)
+    if 0x0C00 <= cp <= 0x0C7F:
+        return SCRIPT_FONTS.get("Telugu", fallback_font)
+    if 0x0C80 <= cp <= 0x0CFF:
+        return SCRIPT_FONTS.get("Kannada", fallback_font)
+    if 0x0D00 <= cp <= 0x0D7F:
+        return SCRIPT_FONTS.get("Malayalam", fallback_font)
+    if (0x0600 <= cp <= 0x06FF or 0x0750 <= cp <= 0x077F or
+            0xFB50 <= cp <= 0xFDFF or 0xFE70 <= cp <= 0xFEFF):
+        return SCRIPT_FONTS.get("Arabic", fallback_font)
+    if 0xAC00 <= cp <= 0xD7AF or 0x1100 <= cp <= 0x11FF:
+        return SCRIPT_FONTS.get("CJK_KR", fallback_font)
+    if 0x3040 <= cp <= 0x309F or 0x30A0 <= cp <= 0x30FF:
+        return SCRIPT_FONTS.get("CJK_JP", fallback_font)
+    if (0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or
+            0xF900 <= cp <= 0xFAFF):
+        return SCRIPT_FONTS.get("CJK_SC", fallback_font)
+    if 0x3000 <= cp <= 0x303F or 0x3200 <= cp <= 0x33FF:
+        return SCRIPT_FONTS.get("CJK_SC", SCRIPT_FONTS.get("CJK_JP", fallback_font))
+    if 0xFF00 <= cp <= 0xFFEF:
+        return SCRIPT_FONTS.get("CJK_SC", SCRIPT_FONTS.get("CJK_JP", fallback_font))
+    if 0x0400 <= cp <= 0x04FF:
+        return SCRIPT_FONTS.get("Cyrillic", fallback_font)
+    # --- ADDED: General Punctuation (includes en dash – and em dash —) ---
+    if 0x2000 <= cp <= 0x206F:
+        return SCRIPT_FONTS.get("Regular", SCRIPT_FONTS.get("Cyrillic", fallback_font))
+    if cp > 127:
+        # Try to find any loaded Unicode font for symbols/punctuation
+        for k in ["Regular", "Cyrillic", "CJK_SC", "ArialUnicode"]:
+            if k in SCRIPT_FONTS:
+                return SCRIPT_FONTS[k]
+    return fallback_font
+
+
 def draw_mixed_text(pdf_out, text: str, x: float, y: float, font_size: float,
-                    fallback_font: str = "helv"):
+                    fallback_font: str = "helv", lang_code: str = "en"):
     """Draw text switching fonts automatically per Unicode block using fpdf2."""
     if not text:
         return
 
-    def _font_for(ch: str) -> str:
-        cp = ord(ch)
-        if 0x0900 <= cp <= 0x097F or 0xA8E0 <= cp <= 0xA8FF:
-            return SCRIPT_FONTS.get("Devanagari", fallback_font)
-        if 0x0980 <= cp <= 0x09FF:
-            return SCRIPT_FONTS.get("Bengali", fallback_font)
-        if 0x0A00 <= cp <= 0x0A7F:
-            return SCRIPT_FONTS.get("Gurmukhi", fallback_font)
-        if 0x0A80 <= cp <= 0x0AFF:
-            return SCRIPT_FONTS.get("Gujarati", fallback_font)
-        if 0x0B80 <= cp <= 0x0BFF:
-            return SCRIPT_FONTS.get("Tamil", fallback_font)
-        if 0x0C00 <= cp <= 0x0C7F:
-            return SCRIPT_FONTS.get("Telugu", fallback_font)
-        if 0x0C80 <= cp <= 0x0CFF:
-            return SCRIPT_FONTS.get("Kannada", fallback_font)
-        if 0x0D00 <= cp <= 0x0D7F:
-            return SCRIPT_FONTS.get("Malayalam", fallback_font)
-        if (0x0600 <= cp <= 0x06FF or 0x0750 <= cp <= 0x077F or
-                0xFB50 <= cp <= 0xFDFF or 0xFE70 <= cp <= 0xFEFF):
-            return SCRIPT_FONTS.get("Arabic", fallback_font)
-        if 0xAC00 <= cp <= 0xD7AF or 0x1100 <= cp <= 0x11FF:
-            return SCRIPT_FONTS.get("CJK_KR", fallback_font)
-        if 0x3040 <= cp <= 0x309F or 0x30A0 <= cp <= 0x30FF:
-            return SCRIPT_FONTS.get("CJK_JP", fallback_font)
-        if (0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or
-                0xF900 <= cp <= 0xFAFF):
-            return SCRIPT_FONTS.get("CJK_SC", fallback_font)
-        if 0x3000 <= cp <= 0x303F or 0x3200 <= cp <= 0x33FF:
-            return SCRIPT_FONTS.get("CJK_SC", SCRIPT_FONTS.get("CJK_JP", fallback_font))
-        if 0xFF00 <= cp <= 0xFFEF:
-            return SCRIPT_FONTS.get("CJK_SC", SCRIPT_FONTS.get("CJK_JP", fallback_font))
-        if 0x0400 <= cp <= 0x04FF:
-            return SCRIPT_FONTS.get("Cyrillic", fallback_font)
-        if cp > 127:
-            return SCRIPT_FONTS.get("ArialUnicode", fallback_font)
-        return fallback_font
-
     segments, cur_font, cur_chunk = [], None, ""
     for ch in text:
         f = _font_for(ch)
+        # BUGFIX: Spaces return fallback_font which breaks Devanagari shaping.
+        # Keep whitespace in the same font as the preceding chunk so that
+        # HarfBuzz shapes the whole phrase (including inter-word spaces) together.
+        if ch.isspace() and cur_font is not None:
+            f = cur_font
         if f != cur_font:
             if cur_chunk:
                 segments.append((cur_font, cur_chunk))
@@ -120,11 +136,27 @@ def draw_mixed_text(pdf_out, text: str, x: float, y: float, font_size: float,
                     pdf_out.add_font(font_id, fname=seg_font)
                 pdf_out.set_font(font_id, size=font_size)
                 
-                # Apply explicit script shaping for Devanagari to ensure matra joining
+                # Fix 1: Use the correct OpenType script+language tag per target language
+                # Wrong lang tag causes matra displacement (e.g. "mar" for Hindi input)
                 if "Devanagari" in seg_font or is_deva:
-                    pdf_out.set_text_shaping(True, script="deva", language="hin")
+                    _hb_lang = {"hi": "hin", "mr": "mar", "ne": "nep", "kok": "kok"}.get(lang_code, "hin")
+                    pdf_out.set_text_shaping(True, script="dev2", language=_hb_lang)
+                elif "Bengali" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="bng2", language="ben")
+                elif "Tamil" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="tml2", language="tam")
+                elif "Telugu" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="tel2", language="tel")
+                elif "Kannada" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="knd2", language="kan")
+                elif "Malayalam" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="mlm2", language="mal")
+                elif "Gujarati" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="gjr2", language="guj")
+                elif "Gurmukhi" in (seg_font or ""):
+                    pdf_out.set_text_shaping(True, script="guru", language="pan")
                 else:
-                    pdf_out.set_text_shaping(True) # generic
+                    pdf_out.set_text_shaping(True)  # generic
             except Exception:
                 pdf_out.set_font("helvetica", size=font_size)
         else:
@@ -414,6 +446,10 @@ def _translate_with_retry(text: str, target_language: str, max_retries: int = 2)
     import time
     if not text or not text.strip():
         return text
+    # Clean redundant whitespaces before translation
+    text = " ".join(text.split())
+    if len(text) < 2: return text
+
     for attempt in range(max_retries + 1):
         try:
             result = GoogleTranslator(source="auto", target=target_language).translate(text)
@@ -427,11 +463,33 @@ def _translate_with_retry(text: str, target_language: str, max_retries: int = 2)
     return text  # fall back to original on total failure
 
 
+def _deduplicate_lines(lines: list, threshold: float = 0.8) -> list:
+    """Remove redundant lines that occupy nearly identical space with similar text."""
+    if not lines: return []
+    unique = []
+    for l in lines:
+        is_dup = False
+        l_text = l["text"].strip().lower()
+        l_box = (l["x0"], l["top"], l["x1"], l["bottom"])
+        for u in unique:
+            u_text = u["text"].strip().lower()
+            u_box = (u["x0"], u["top"], u["x1"], u["bottom"])
+            # If boxes overlap significantly and text is similar
+            box_match = (abs(l_box[0] - u_box[0]) < 5 and abs(l_box[1] - u_box[1]) < 5)
+            text_match = (l_text == u_text or l_text in u_text or u_text in l_text)
+            if box_match and text_match:
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(l)
+    return unique
+
+
+
 def _is_label_value_line(label: str) -> bool:
     """Return True only when the left side of a colon looks like a plain label.
     Guards against splitting URLs, timestamps, ratios, codes, etc."""
     label = label.strip()
-    # Labels are short (≤40 chars), have no digits, and no '/' or '.' sequences
     if len(label) > 40:
         return False
     if any(ch.isdigit() for ch in label):
@@ -441,154 +499,500 @@ def _is_label_value_line(label: str) -> bool:
     return True
 
 
+# ── FIX 4: Punctuation normaliser ─────────────────────────────────────────────
+def _fix_punctuation(text: str) -> str:
+    """Remove spaces that Google Translate inserts before punctuation marks."""
+    # Space before  , . ; : ! ? ) ] } । (Hindi danda)
+    text = re.sub(r'\s+([,\.;:!?\)\]}\u0964\u0965])', r'\1', text)
+    # Space after  ( [ {
+    text = re.sub(r'([\(\[{])\s+', r'\1', text)
+    # Fix 5: Remove comma before Hindi/Marathi auxiliary verbs — a Google Translate artefact
+    # e.g. "सहायता करते, है" → "सहायता करते है"
+    if any(0x0900 <= ord(c) <= 0x097F for c in text):
+        text = re.sub(
+            r',\s*(\u0939\u0948|\u0939\u0948\u0902|\u0925\u093e|\u0925\u0947|\u0925\u0940'
+            r'|\u0939\u094b|\u0939\u094b\u0917\u093e|\u0939\u094b\u0917\u0940'
+            r'|\u0939\u094b\u0902\u0917\u0947|\u0939\u0942\u0901|\u0939\u0942\u0902)(?=[\s\.,\u0964\u0965\?!]|$)',
+            r' \1', text
+        )
+    return text.strip()
+
+
+def _get_unicode_font_id(pdf_out, fs: float) -> str:
+    """Ensure a Unicode/Devanagari font is registered and active; return its font ID."""
+    deva_ttf = SCRIPT_FONTS.get("Devanagari")
+    if deva_ttf and deva_ttf.endswith(".ttf"):
+        font_id = os.path.basename(deva_ttf).split(".")[0]
+        if font_id.lower() not in pdf_out.fonts:
+            pdf_out.add_font(font_id, fname=deva_ttf)
+        pdf_out.set_font(font_id, size=fs)
+        return font_id
+    # Fallback: NotoSans Regular
+    fallback_ttf = SCRIPT_FONTS.get("Regular")
+    if fallback_ttf and fallback_ttf.endswith(".ttf"):
+        font_id = os.path.basename(fallback_ttf).split(".")[0]
+        if font_id.lower() not in pdf_out.fonts:
+            pdf_out.add_font(font_id, fname=fallback_ttf)
+        pdf_out.set_font(font_id, size=fs)
+        return font_id
+    pdf_out.set_font("helvetica", size=fs)
+    return "helvetica"
+
+
+# ── FIX 3: Source-language detector ──────────────────────────────────────────
+def _detect_source_lang(text: str) -> str:
+    """Return 'en' if the text is mostly ASCII/Latin, else 'auto'."""
+    if not text:
+        return 'auto'
+    alpha_chars = [c for c in text if c.isalpha()]
+    if not alpha_chars:
+        return 'auto'
+    ascii_alpha = sum(1 for c in alpha_chars if ord(c) < 128)
+    return 'en' if (ascii_alpha / len(alpha_chars)) > 0.75 else 'auto'
+
+
+# ── Glossary: standardize key AI/tech terms ────────────────────────────────────
+# These replacements are applied AFTER translation to maintain consistency.
+_GLOSSARY: dict = {
+    "hi": {
+        "बकाई": "एआई",
+        "विकाई": "एआई",
+        "छकाई": "एआई",
+        "एकाई": "एआई",   # Fix 3: cover more hallucination variants
+        "आकाई": "एआई",
+        "artificial intelligence": "कृत्रिम बुद्धिमत्ता",
+        "machine learning": "मशीन लर्निंग",
+        "deep learning": "डीप लर्निंग",
+        "natural language processing": "प्राकृतिक भाषा प्रसंस्करण",
+        "neural network": "न्यूरल नेटवर्क",
+    },
+    "mr": {
+        "बकाई": "एआई",
+        "विकाई": "एआई",
+        "एकाई": "एआई",
+        "artificial intelligence": "कृत्रिम बुद्धिमत्ता",
+        "machine learning": "मशीन लर्निंग",
+    },
+}
+
+
+def _apply_glossary(text: str, lang: str) -> str:
+    """Case-insensitive replacement of known bad translations."""
+    glossary = _GLOSSARY.get(lang, {})
+    for wrong, correct in glossary.items():
+        # Replace whole-word, case-insensitive
+        text = re.sub(re.escape(wrong), correct, text, flags=re.IGNORECASE)
+    return text
+
+
+def _is_non_latin(text: str) -> bool:
+    """Return True if the text contains any non-ASCII alphabetic character."""
+    return any(c.isalpha() and ord(c) > 127 for c in text)
+
+
+# ── FIX 3: Batch translator using numbered list for context ───────────────────
+def _translate_batch(texts: list, source_lang: str, target_lang: str) -> list:
+    """Translate multiple strings in one API call using a numbered-list format.
+    Falls back to individual calls if batching fails or the payload is too large."""
+    import time
+    if not texts:
+        return texts
+
+    numbered = "\n".join(f"{i + 1}) {t.strip()}" for i, t in enumerate(texts))
+    if len(numbered) > 4500:          # too long — translate individually
+        return [_fix_punctuation(_translate_with_retry(t, target_lang)) for t in texts]
+
+    try:
+        result = GoogleTranslator(source=source_lang, target=target_lang).translate(numbered)
+        if result:
+            parsed: dict = {}
+            for line in result.strip().splitlines():
+                m = re.match(r'^(\d+)[.)\s]\s*(.*)', line.strip())
+                if m:
+                    parsed[int(m.group(1)) - 1] = m.group(2).strip()
+            if len(parsed) == len(texts):
+                return [_fix_punctuation(parsed.get(i, texts[i])) for i in range(len(texts))]
+    except Exception as e:
+        print(f"[batch_translate] failed: {e}")
+
+    # Fallback: translateone by one
+    return [_fix_punctuation(_translate_with_retry(t, target_lang)) for t in texts]
+
+
+# ── FIX 6: Column detector ─────────────────────────────────────────────────────
+def _detect_columns(lines: list, page_width: float) -> int:
+    """Return 1 or 2 — how many text columns the page likely has."""
+    if len(lines) < 6:
+        return 1
+    x0s = [l["x0"] for l in lines]
+    # Count lines whose x0 sits in the right half of the page
+    right_count = sum(1 for x in x0s if x > page_width * 0.45)
+    # If >25 % of lines start on the right half, assume 2-column layout
+    if right_count > len(x0s) * 0.25:
+        return 2
+    return 1
+
+
 def process_translation(input_path: str, language: str, task_id: str, file_key: str):
     import pdfplumber
     import fitz
     import os
+    import time
 
-    # We create our own DB session here because it's a background task
     from database import SessionLocal
     db = SessionLocal()
 
     try:
         output_path = f"translated_{task_id}.pdf"
-        
         image_temp_files = []
+
+        # Open fitz doc alongside pdfplumber for image OCR (Fix 5)
+        fitz_doc = fitz.open(input_path)
 
         with pdfplumber.open(input_path) as pdf:
             total_pages = len(pdf.pages)
-            first_page = pdf.pages[0]
-            
-            # Using 'pt' to match pdfplumber's coordinates
-            pdf_out = FPDF(unit="pt", format=(first_page.width, first_page.height))
-            # Explicitly enable text shaping via uharfbuzz
+            first_page  = pdf.pages[0]
+
+            # FIX 3: Detect source language once from first page
+            sample_text = (first_page.extract_text() or "")[:600]
+            source_lang = _detect_source_lang(sample_text)
+            print(f"[translate] source_lang detected: {source_lang}")
+
+            # FIX 2: No default format — set per-page in add_page()
+            pdf_out = FPDF(unit="pt")
             pdf_out.set_text_shaping(True)
-            
+            # FIX 2: Disable auto page-break so FPDF never inserts phantom pages
+            pdf_out.set_auto_page_break(False)
+
             for page_index, page in enumerate(pdf.pages):
                 current_page_num = page_index + 1
+
+                # FIX 2: Always pass actual page size — no special-casing for page 0
+                pdf_out.add_page(format=(page.width, page.height))
+
+                fitz_page = fitz_doc[page_index]
+
+                # ── PROCESS IMAGES (FIX 5) ──────────────────────────────────────
+                processed_rects = [] # list of (x0, top, x1, bottom) for skipping main text loop
                 
-                if page_index > 0:
-                    pdf_out.add_page(format=(page.width, page.height))
-                else:
-                    pdf_out.add_page()
-                
-                # --- PROCESS IMAGES ---
                 for img in page.images:
                     try:
-                        # Extract image bounding box using page cropping
                         bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
                         cropped_page = page.within_bbox(bbox)
                         img_obj = cropped_page.to_image(resolution=200)
-                        
-                        # Save temp image
-                        import tempfile
+
                         temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
                         img_obj.save(temp_img.name, format="PNG")
                         temp_img.close()
                         image_temp_files.append(temp_img.name)
-                        
-                        pdf_out.image(temp_img.name, x=img["x0"], y=img["top"], w=img["width"], h=img["height"])
-                    except Exception as e:
-                        print(f"Failed to process image on page {current_page_num}: {e}")
+
+                        # Fix 2: Wipe the full image bbox first so any PDF text-layer
+                        # sitting underneath (English chart annotations) is hidden
+                        pdf_out.set_fill_color(255, 255, 255)
+                        pdf_out.rect(img["x0"], img["top"], img["width"], img["height"], style="F")
+
+                        # Draw the rasterised image
+                        pdf_out.image(temp_img.name,
+                                      x=img["x0"], y=img["top"],
+                                      w=img["width"], h=img["height"])
+
+                        # FIX 5A: Extract vector text from the image region via fitz
+                        # This catches labels like "Time", "Impact" often found in charts
+                        clip = fitz.Rect(img["x0"], img["top"],
+                                         img["x1"], img["bottom"])
+                        vec_blocks = fitz_page.get_text("blocks", clip=clip)
+
+                        found_vec_text = False
+                        for block in (vec_blocks or []):
+                            btext = (block[4] if len(block) > 4 else "").strip()
+                            if not btext or len(btext) < 2:
+                                continue
+                            
+                            found_vec_text = True
+                            bx0, by0, bx1, by1 = block[0], block[1], block[2], block[3]
+                            
+                            # Add to processed_rects to avoid drawing this text again in the main loop
+                            processed_rects.append((bx0 - 2, by0 - 2, bx1 + 2, by1 + 2))
+                            
+                            t_btext = _fix_punctuation(_translate_with_retry(btext, language))
+                            
+                            # Fix 2: Expand white rect ±3 pt so no edge pixel of English text bleeds through
+                            pdf_out.set_fill_color(255, 255, 255)
+                            pdf_out.rect(bx0 - 3, by0 - 3, (bx1 - bx0) + 6, (by1 - by0) + 6, style="F")
+                            # Use smaller font for chart labels; pass lang_code for Fix 1
+                            draw_mixed_text(pdf_out, t_btext, bx0, by1, 8, lang_code=language)
+
+                        # FIX 5B: OCR fallback for raster images without vector text
+                        if not found_vec_text:
+                            try:
+                                import pytesseract
+                                # Run tesseract to get bounding boxes and text
+                                ocr_data = pytesseract.image_to_data(temp_img.name, output_type=pytesseract.Output.DICT)
+                                for i in range(len(ocr_data["text"])):
+                                    txt = ocr_data["text"][i].strip()
+                                    if len(txt) > 2 and int(ocr_data["conf"][i]) > 50:
+                                        # Scale coordinates from raster to PDF
+                                        scale_x = img["width"] / img_obj.width
+                                        scale_y = img["height"] / img_obj.height
+                                        ox0 = img["x0"] + ocr_data["left"][i] * scale_x
+                                        oy0 = img["top"] + ocr_data["top"][i] * scale_y
+                                        ox1 = ox0 + ocr_data["width"][i] * scale_x
+                                        oy1 = oy0 + ocr_data["height"][i] * scale_y
+                                        
+                                        t_txt = _fix_punctuation(_translate_with_retry(txt, language))
+                                        
+                                        # White out and overdraw
+                                        pdf_out.set_fill_color(255, 255, 255)
+                                        pdf_out.rect(ox0 - 2, oy0 - 2, (ox1 - ox0) + 4, (oy1 - oy0) + 4, style="F")
+                                        draw_mixed_text(pdf_out, t_txt, ox0, oy1, 8, lang_code=language)
+                            except Exception as ocr_err:
+                                print(f"[image OCR] skipped: {ocr_err}")
+
+                    except Exception as img_err:
+                        print(f"[image] page {current_page_num}: {img_err}")
+
+
+                # ── PROCESS TEXT ─────────────────────────────────────────────
+                # FIX 1: Primary extraction + Word fallback
+                raw_lines = page.extract_text_lines(layout=True, x_tolerance=2)
                 
-                # --- PROCESS TEXT ---
-                # Using extract_text_lines() is much better at preserving spaces.
-                # Adding x_tolerance=2 ensures narrow gaps become spaces.
-                text_lines = page.extract_text_lines(layout=True, x_tolerance=2)
+                # Word-level fallback logic to catch missed content
+                line_rects = [(l["x0"], l["top"], l["x1"], l["bottom"]) for l in raw_lines]
+                uncovered = []
+                for word in (page.extract_words() or []):
+                    wx0, wtop, wx1, wbot = word["x0"], word["top"], word["x1"], word["bottom"]
+                    if not any(lx0-2 <= wx0 and lx1+2 >= wx1 and ltop-2 <= wtop and lbot+2 >= wbot for lx0, ltop, lx1, lbot in line_rects):
+                        uncovered.append(word)
+                if uncovered:
+                    uncovered.sort(key=lambda w: (round(w["top"]/5)*5, w["x0"]))
+                    groups, cur_grp = [], [uncovered[0]]
+                    for w in uncovered[1:]:
+                        if abs(w["top"] - cur_grp[-1]["top"]) < 6: cur_grp.append(w)
+                        else: groups.append(cur_grp); cur_grp = [w]
+                    groups.append(cur_grp)
+                    for grp in groups:
+                        raw_lines.append({"text": " ".join(w["text"] for w in grp), "x0": min(w["x0"] for w in grp), "x1": max(w["x1"] for w in grp), "top": min(w["top"] for w in grp), "bottom": max(w["bottom"] for w in grp)})
 
-                # Now we translate and draw each line
+                # FIX 1: Deduplicate and filter out regions already processed in images/charts
+                text_lines = []
+                for line in _deduplicate_lines(raw_lines):
+                    # Check if this line overlaps with any rect already processed (e.g. chart labels)
+                    lx0, ltop, lx1, lbot = line["x0"], line["top"], line["x1"], line["bottom"]
+                    is_processed = any(px0 <= lx0+2 and px1 >= lx1-2 and ptop <= ltop+2 and pbot >= lbot-2 for px0, ptop, px1, pbot in processed_rects)
+                    if not is_processed:
+                        text_lines.append(line)
+
+                text_lines.sort(key=lambda l: (l["top"], l["x0"]))
+
+
+                # Annotate lines with font size and column id
                 for line in text_lines:
-                    full_text = line["text"].strip()
-                    if not full_text: continue
+                    chars_on = [
+                        c for c in page.chars
+                        if c["top"] >= line["top"] - 1
+                        and c["bottom"] <= line["bottom"] + 1
+                    ]
+                    line["_fs"] = (
+                        sum(c["size"] for c in chars_on) / len(chars_on)
+                        if chars_on else 12
+                    )
 
-                    # Estimate font size from bbox if not available, but usually it is 12
-                    font_size = 12
-                    # Try to find font size from characters in the line
-                    line_chars = [c for c in page.chars if c["top"] >= line["top"] and c["bottom"] <= line["bottom"]]
-                    if line_chars:
-                        font_size = sum(c["size"] for c in line_chars) / len(line_chars)
+                # FIX 6: Detect columns; build per-column Y cursors
+                num_cols = _detect_columns(text_lines, page.width)
+                col_y: dict = {}  # col_id -> current baseline y
 
-                    start_x = line["x0"]
-                    baseline_y = line["bottom"]
+                def _col_id(x0: float) -> int:
+                    return 0 if (num_cols == 1 or x0 < page.width * 0.48) else 1
+
+                for line in text_lines:
+                    line["_col"] = _col_id(line["x0"])
+
+                # FIX 3 / FIX 6: Build semantic batches based on vertical proximity and column
+                # Fix 4: Track translated blocks already drawn on this page to prevent duplication
+                seen_blocks: set = set()
+                seen_source_blocks: set = set()
+
+                batches = []
+                cur_batch = []
+                last_y = -100
+                last_col = -1
+                
+                for line in text_lines:
+                    t = line["text"].strip()
+                    if not t: continue
                     
-                    # Split label : value only when the left-hand side is a plain
-                    # short label (not a URL, timestamp, code, etc.)
-                    if ":" in full_text:
-                        parts = full_text.split(":", 1)
-                        label = parts[0].strip()
-                        value = parts[1].strip()
-
-                        if _is_label_value_line(label):
-                            # Translate label and value independently for best accuracy
-                            translated_label = _translate_with_retry(label, language)
-                            translated_val   = _translate_with_retry(value, language) if value else ""
-                            full_translated  = translated_label + " : " + translated_val
-                        else:
-                            # Treat the whole line as a single unit
-                            full_translated = _translate_with_retry(full_text, language)
-
-                        draw_mixed_text(pdf_out, full_translated, start_x, baseline_y, font_size)
+                    fs = line["_fs"]
+                    col = line["_col"]
+                    y = line["bottom"]
+                    
+                    # Start new batch if column changes or there is a large vertical jump (new paragraph)
+                    if col != last_col or abs(y - last_y) > fs * 2.5 or len(cur_batch) >= 10:
+                        if cur_batch: batches.append(cur_batch)
+                        cur_batch = [line]
                     else:
-                        # No colon — translate the whole line
-                        translated_text = _translate_with_retry(full_text, language)
-                        draw_mixed_text(pdf_out, translated_text, start_x, baseline_y, font_size)
+                        cur_batch.append(line)
+                    
+                    last_y = y
+                    last_col = col
+                if cur_batch: batches.append(cur_batch)
 
-                # Update Progress
-                progress = int((current_page_num / total_pages) * 90)
-                progress_store[task_id] = progress
-                print(f"Progress: {progress}%")
+                # Translate each batch then draw
+                for batch in batches:
+                    # Semantic Joining: Join lines into a single string for better context
+                    raw_text = " ".join(l["text"].strip() for l in batch)
+                    _source_key = raw_text.lower()
+                    
+                    # Fix 4 (Round 2): Overlapping shadow text forms duplicate extracted English lines
+                    # If the source string is >85% identical to an already seen source block on this page, it's a shadow duplicate
+                    from difflib import SequenceMatcher
+                    found_dup = False
+                    if len(_source_key) > 5:
+                        for seen_src in seen_source_blocks:
+                            if SequenceMatcher(None, _source_key, seen_src).ratio() > 0.85:
+                                found_dup = True
+                                break
+                    
+                    if found_dup:
+                        continue
+                    if len(_source_key) > 5:
+                        seen_source_blocks.add(_source_key)
 
-            # Finalize PDF
-            pdf_out.output(output_path)
-            
-        # Cleanup image temp files
-        for tmp_img in image_temp_files:
+                    if ":" in raw_text and len(batch) == 1:
+                        parts = raw_text.split(":", 1)
+                        lbl, val = parts[0].strip(), parts[1].strip()
+                        if _is_label_value_line(lbl):
+                            t_lbl = _translate_with_retry(lbl, language)
+                            t_val = _translate_with_retry(val, language) if val else ""
+                            translated_block = _fix_punctuation(f"{t_lbl} : {t_val}")
+                        else:
+                            translated_block = _fix_punctuation(_translate_with_retry(raw_text, language))
+                    else:
+                        translated_block = _fix_punctuation(_translate_with_retry(raw_text, language))
+
+                    # Apply glossary to fix badly translated AI/tech terms
+                    translated_block = _apply_glossary(translated_block, language)
+
+                    # Fix 4: Skip this batch if we already drew the same translated text on this page
+                    _block_key = " ".join(translated_block.split())
+                    if len(_block_key) >= 4:
+                        if _block_key in seen_blocks:
+                            continue
+                        seen_blocks.add(_block_key)
+
+                    first_line = batch[0]
+                    last_line  = batch[-1]
+                    fs  = first_line["_fs"]
+                    col = first_line["_col"]
+
+                    if col not in col_y or col_y[col] < first_line["bottom"] - fs * 2:
+                        col_y[col] = first_line["bottom"]
+
+                    draw_y = min(col_y[col], page.height - 4)
+
+                    # ── SHADOW TEXT FIX ──────────────────────────────────────
+                    # White out the original text bounding box for every line
+                    # in the batch so translated text is not drawn on top.
+                    pdf_out.set_fill_color(255, 255, 255)
+                    for orig_line in batch:
+                        bx0  = orig_line["x0"]
+                        btop = orig_line["top"]
+                        bw   = orig_line["x1"] - bx0
+                        bh   = orig_line["bottom"] - btop
+                        if bw > 0 and bh > 0:
+                            pdf_out.rect(bx0, btop, bw, bh + 1, style="F")
+
+                    # ── WIDTH MEASUREMENT using Unicode font ──────────────────
+                    col_width = (page.width * 0.45) if num_cols == 2 else (page.width - first_line["x0"] - 20)
+
+                    # Always use a Unicode-capable font for measurement to avoid crashes
+                    if _is_non_latin(translated_block):
+                        _get_unicode_font_id(pdf_out, fs)
+                    else:
+                        pdf_out.set_font("helvetica", size=fs)
+
+                    words = translated_block.split()
+                    line_chunk = ""
+                    for word in words:
+                        test_str = (line_chunk + " " + word).strip()
+                        try:
+                            w = pdf_out.get_string_width(test_str)
+                        except (UnicodeEncodeError, FPDFUnicodeEncodingException):
+                            w = len(test_str) * (fs * 0.5)
+
+                        if w < col_width:
+                            line_chunk = test_str
+                        else:
+                            if line_chunk:
+                                # Fix 5 (Round 2): blunt force comma cleanup
+                                line_chunk = line_chunk.replace(", है", " है").replace(", हैं", " हैं").replace(", था", " था").replace(", थे", " थे").replace(", थी", " थी")
+                                # Fix 1: pass lang_code so HarfBuzz uses the correct script tag
+                                draw_mixed_text(pdf_out, line_chunk, first_line["x0"], draw_y, fs,
+                                                lang_code=language)
+                                draw_y += fs * 1.3
+                            line_chunk = word
+                    if line_chunk:
+                        # Fix 5 (Round 2): blunt force comma cleanup
+                        line_chunk = line_chunk.replace(", है", " है").replace(", हैं", " हैं").replace(", था", " था").replace(", थे", " थे").replace(", थी", " थी")
+                        draw_mixed_text(pdf_out, line_chunk, first_line["x0"], draw_y, fs,
+                                        lang_code=language)
+                        draw_y += fs * 1.3
+
+                    col_y[col] = draw_y
+
+
+
+                # Update progress
+                progress_store[task_id] = int(
+                    (current_page_num / total_pages) * 90)
+                print(f"[translate] page {current_page_num}/{total_pages} done")
+
+        fitz_doc.close()
+
+        # Finalise PDF
+        pdf_out.output(output_path)
+
+        # Cleanup temp images
+        for tmp in image_temp_files:
             try:
-                os.remove(tmp_img)
-            except:
+                os.remove(tmp)
+            except Exception:
                 pass
 
         # Upload to S3
         progress_store[task_id] = 95
         s3.upload_file(
-            output_path,
-            BUCKET_NAME,
-            file_key,
-            ExtraArgs={
-                "ContentType": "application/pdf"
-            }
+            output_path, BUCKET_NAME, file_key,
+            ExtraArgs={"ContentType": "application/pdf"},
         )
 
         try:
             os.remove(output_path)
             os.remove(input_path)
-        except:
+        except Exception:
             pass
 
         progress_store[task_id] = 100
-        print("Translation complete!")
-        
-        # Update Task Status in DB
-        task_record = db.query(models.TranslationTask).filter(models.TranslationTask.id == task_id).first()
+        print("[translate] Translation complete!")
+
+        task_record = db.query(models.TranslationTask).filter(
+            models.TranslationTask.id == task_id).first()
         if task_record:
             task_record.status = "completed"
-            
-            # Generate permanent download URL
             file_url = s3.generate_presigned_url(
                 "get_object",
-                Params={
-                    "Bucket": BUCKET_NAME,
-                    "Key": file_key
-                },
-                ExpiresIn=3600 * 24 * 7 # 7 days
+                Params={"Bucket": BUCKET_NAME, "Key": file_key},
+                ExpiresIn=3600 * 24 * 7,   # 7 days
             )
             task_record.download_url = file_url
             db.commit()
-            
+
     except Exception as e:
-        print(f"Translation Error: {e}")
+        import traceback
+        print(f"[translate] Error: {e}")
+        traceback.print_exc()
         progress_store[task_id] = -1
-        task_record = db.query(models.TranslationTask).filter(models.TranslationTask.id == task_id).first()
+        task_record = db.query(models.TranslationTask).filter(
+            models.TranslationTask.id == task_id).first()
         if task_record:
             task_record.status = "failed"
             db.commit()

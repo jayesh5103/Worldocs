@@ -22,6 +22,8 @@ fpdf2
 uharfbuzz
 fonttools
 deep-translator
+pytesseract
+Pillow
 
 # AWS & Storage
 boto3
