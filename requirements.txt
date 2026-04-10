@@ -24,6 +24,7 @@ fonttools
 deep-translator
 pytesseract
 Pillow
+python-docx
 
 # AWS & Storage
 boto3

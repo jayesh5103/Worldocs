@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=1.2">
   <script src="config.js"></script>
   <script>
     if (!localStorage.getItem('access_token')) {
@@ -46,6 +46,72 @@
       transition: opacity 0.2s;
     }
     .file-chip .remove-file:hover { opacity: 1; }
+
+    /* Session timeout banner */
+    #session-warning {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 9999;
+      background: linear-gradient(90deg,#f97316,#ef4444);
+      color: #fff;
+      text-align: center;
+      padding: 12px 20px;
+      font-size: 0.93rem;
+      font-weight: 600;
+      animation: slideDown 0.3s ease;
+      box-shadow: 0 4px 20px rgba(239,68,68,0.35);
+    }
+    #session-warning.show { display: block; }
+    #session-warning button {
+      margin-left: 14px;
+      background: rgba(255,255,255,0.25);
+      border: 1.5px solid rgba(255,255,255,0.6);
+      color: #fff;
+      font-weight: 700;
+      padding: 4px 14px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      width: auto;
+      display: inline-block;
+      transition: background 0.2s;
+    }
+    #session-warning button:hover { background: rgba(255,255,255,0.4); }
+    @keyframes slideDown { from{transform:translateY(-100%)} to{transform:none} }
+
+    /* File-type error */
+    .file-type-error {
+      display: none;
+      margin-bottom: 14px;
+      padding: 12px 16px;
+      background: #fff1f2;
+      border: 1.5px solid #fecdd3;
+      border-radius: 10px;
+      color: #9f1239;
+      font-weight: 600;
+      font-size: 0.9rem;
+      animation: shake 0.4s ease;
+    }
+    /* Failed translation card */
+    .fail-card {
+      display: none;
+      margin-top: 18px;
+      padding: 18px 20px;
+      background: #fff1f2;
+      border: 1.5px solid #fecdd3;
+      border-radius: var(--radius-sm);
+      color: #9f1239;
+    }
+    .fail-card h4 { margin: 0 0 6px; font-size: 1rem; }
+    .fail-card p  { margin: 0; font-size: 0.87rem; color: #be123c; }
+    .fail-card .retry-btn {
+      margin-top: 12px;
+      background: linear-gradient(135deg,#ef4444,#dc2626);
+      color:#fff; border:none; border-radius:8px;
+      padding:8px 20px; font-weight:700; font-size:0.88rem;
+      cursor:pointer; width:auto;
+    }
   </style>
 </head>
 <body>
@@ -108,13 +174,25 @@
       </div>
     </div>
 
+    <!-- Session Timeout Warning Banner -->
+    <div id="session-warning">
+      ⏰ Your session expires in <strong id="session-countdown">5:00</strong> due to inactivity.
+      <button onclick="resetSessionTimer()">Stay Logged In</button>
+      <button onclick="logout()" style="background:rgba(0,0,0,0.2);">Logout Now</button>
+    </div>
+
     <!-- Drop Zone -->
     <div class="drop-area" id="dropArea">
       <div class="drop-icon">&#128196;</div>
-      <div class="drop-label" id="dropLabel">Drag &amp; Drop your PDF here</div>
-      <div class="drop-sub">or click to browse files</div>
+      <div class="drop-label" id="dropLabel">Drag &amp; Drop your PDF or DOCX here</div>
+      <div class="drop-sub">or click to browse files &nbsp;·&nbsp; PDF &amp; DOCX supported</div>
     </div>
-    <input type="file" id="pdfFile" accept=".pdf" hidden>
+    <input type="file" id="pdfFile" accept=".pdf,.docx" hidden>
+
+    <!-- File-type error -->
+    <div class="file-type-error" id="fileTypeError">
+      ⛔ Only PDF (.pdf) and Word (.docx) files are supported. Please select a valid file.
+    </div>
 
     <!-- File chosen chip -->
     <div id="fileChip" style="display:none; margin-bottom: 16px;">
@@ -163,23 +241,30 @@
 
     <!-- Translate Button -->
     <button id="translateBtn" onclick="uploadPDF()">
-      &#10024; Translate PDF
+      &#10024; Translate Document
     </button>
 
     <!-- File Warning -->
     <div id="fileWarning" style="display:none; margin-top:14px; padding:12px 16px; background:#fff7ed; border:1.5px solid #fed7aa; border-radius:10px; color:#9a3412; font-weight:500; font-size:0.92rem; align-items:center; gap:10px; animation: shake 0.4s ease;">
-      &#9888;&#65039; Please select a PDF file before clicking Translate.
+      &#9888;&#65039; Please select a PDF or DOCX file before clicking Translate.
     </div>
 
     <!-- Progress Loader -->
     <div id="loader" style="display:none; margin-top:22px; padding:20px; background:var(--bg); border-radius:var(--radius-sm); border:1.5px solid var(--border);">
       <p style="font-weight:700; color:var(--primary-dark); margin-bottom:12px; font-size:0.95rem;">
-        <span style="animation: pulse 1s ease-in-out infinite; display:inline-block;">&#9203;</span> Translating your PDF&hellip;
+        <span style="animation: pulse 1s ease-in-out infinite; display:inline-block;">&#9203;</span> Translating your document&hellip;
       </p>
       <div class="progress-track">
         <div id="progressBar"></div>
       </div>
       <p id="percent" style="color:var(--primary); font-weight:700; font-size:1rem; margin-top:8px;">0%</p>
+    </div>
+
+    <!-- Failure Card -->
+    <div class="fail-card" id="failCard">
+      <h4>❌ Translation Failed</h4>
+      <p id="failMsg">An error occurred while translating your document. Please check the file and try again.</p>
+      <button class="retry-btn" onclick="resetForRetry()">🔄 Try Again</button>
     </div>
 
     <!-- Status -->
@@ -199,10 +284,55 @@
   <script>
     const API = window.API_CONFIG.API_URL;
     const userToken = localStorage.getItem('access_token');
+
+    // ── Session Idle Timeout (30 min) ──────────────────────────────────────
+    const SESSION_TIMEOUT_MS  = 30 * 60 * 1000;  // 30 minutes
+    const SESSION_WARN_BEFORE = 5  * 60 * 1000;  // warn 5 mins before
+    let _sessionTimer, _warnTimer, _warnCountdown;
+
+    function resetSessionTimer() {
+      clearTimeout(_sessionTimer);
+      clearTimeout(_warnTimer);
+      clearInterval(_warnCountdown);
+      document.getElementById('session-warning').classList.remove('show');
+
+      // Schedule warning at 25 min
+      _warnTimer = setTimeout(() => showSessionWarning(), SESSION_TIMEOUT_MS - SESSION_WARN_BEFORE);
+      // Schedule logout at 30 min
+      _sessionTimer = setTimeout(() => { logout(); }, SESSION_TIMEOUT_MS);
+    }
+
+    function showSessionWarning() {
+      const banner = document.getElementById('session-warning');
+      banner.classList.add('show');
+      let secs = (SESSION_WARN_BEFORE / 1000);
+      const el = document.getElementById('session-countdown');
+      el.textContent = fmt(secs);
+      _warnCountdown = setInterval(() => {
+        secs--;
+        el.textContent = fmt(secs);
+        if (secs <= 0) { clearInterval(_warnCountdown); logout(); }
+      }, 1000);
+    }
+
+    function fmt(s) {
+      const m = Math.floor(s / 60), r = Math.floor(s % 60);
+      return `${m}:${String(r).padStart(2,'0')}`;
+    }
+
+    // Reset timer on any user activity
+    ['mousemove','keydown','click','scroll','touchstart'].forEach(ev =>
+      document.addEventListener(ev, resetSessionTimer, { passive: true })
+    );
+    resetSessionTimer(); // kick off on load
+
     function logout() {
       localStorage.removeItem('access_token');
       window.location.href = 'login.html';
     }
+
+    // ── File handling ──────────────────────────────────────────────────────
+    const ALLOWED_EXTS = ['.pdf', '.docx'];
 
     const dropArea     = document.getElementById('dropArea');
     const fileInput    = document.getElementById('pdfFile');
@@ -221,31 +351,65 @@
     });
     fileInput.addEventListener('change', handleFileSelected);
 
+    function isAllowedFile(file) {
+      if (!file) return false;
+      const name = (file.name || '').toLowerCase();
+      return ALLOWED_EXTS.some(ext => name.endsWith(ext));
+    }
+
     function handleFileSelected() {
       const file = fileInput.files[0];
-      if (file) {
-        dropArea.classList.add('has-file');
-        dropLabel.textContent = '\u2705 File ready!';
-        fileChipName.textContent = file.name;
-        fileChip.style.display = 'block';
-        document.getElementById('fileWarning').style.display = 'none';
+      const typeErr = document.getElementById('fileTypeError');
+      if (!file) return;
+
+      if (!isAllowedFile(file)) {
+        typeErr.style.display = 'block';
+        fileInput.value = '';
+        dropArea.classList.remove('has-file');
+        dropLabel.textContent = 'Drag & Drop your PDF or DOCX here';
+        fileChip.style.display = 'none';
+        return;
       }
+      typeErr.style.display = 'none';
+      dropArea.classList.add('has-file');
+      const icon = file.name.endsWith('.docx') ? '📝' : '📄';
+      dropLabel.textContent = '✅ File ready!';
+      fileChipName.textContent = file.name;
+      fileChip.style.display = 'block';
+      document.getElementById('fileWarning').style.display = 'none';
+      document.getElementById('failCard').style.display = 'none';
     }
 
     function removeFile() {
       fileInput.value = '';
       dropArea.classList.remove('has-file');
-      dropLabel.textContent = 'Drag & Drop your PDF here';
+      dropLabel.textContent = 'Drag & Drop your PDF or DOCX here';
       fileChip.style.display = 'none';
+      document.getElementById('fileTypeError').style.display = 'none';
     }
 
+    function resetForRetry() {
+      document.getElementById('failCard').style.display = 'none';
+      document.getElementById('status').textContent = '';
+      const btn = document.getElementById('translateBtn');
+      btn.disabled = false;
+      btn.innerHTML = '&#10024; Translate Document';
+      removeFile();
+    }
+
+    // ── Upload & Translate ─────────────────────────────────────────────────
     async function uploadPDF() {
-      const status  = document.getElementById('status');
-      const loader  = document.getElementById('loader');
-      const bar     = document.getElementById('progressBar');
-      const percent = document.getElementById('percent');
-      const warning = document.getElementById('fileWarning');
-      const btn     = document.getElementById('translateBtn');
+      const statusEl = document.getElementById('status');
+      const loader   = document.getElementById('loader');
+      const bar      = document.getElementById('progressBar');
+      const percent  = document.getElementById('percent');
+      const warning  = document.getElementById('fileWarning');
+      const failCard = document.getElementById('failCard');
+      const failMsg  = document.getElementById('failMsg');
+      const btn      = document.getElementById('translateBtn');
+
+      failCard.style.display = 'none';
+      statusEl.textContent   = '';
 
       if (fileInput.files.length === 0) {
         warning.style.display = 'flex';
@@ -253,14 +417,29 @@
         setTimeout(() => { dropArea.style.borderColor = ''; }, 1600);
         return;
       }
-      warning.style.display = 'none';
-      loader.style.display  = 'block';
-      btn.disabled = true;
-      btn.textContent = '\u23f3 Uploading\u2026';
+
+      const chosenFile = fileInput.files[0];
+      if (!isAllowedFile(chosenFile)) {
+        document.getElementById('fileTypeError').style.display = 'block';
+        return;
+      }
+
+      warning.style.display   = 'none';
+      loader.style.display    = 'block';
+      btn.disabled            = true;
+      btn.textContent         = '⏳ Uploading…';
 
       const formData = new FormData();
-      formData.append('file', fileInput.files[0]);
+      formData.append('file', chosenFile);
       formData.append('language', document.getElementById('language').value);
+
+      function showFail(msg) {
+        loader.style.display = 'none';
+        btn.disabled = false;
+        btn.innerHTML = '&#10024; Translate Document';
+        failMsg.textContent = msg || 'An unexpected error occurred. Please try again.';
+        failCard.style.display = 'block';
+      }
 
       try {
         const response = await fetch(`${API}/translate`, {
@@ -269,40 +448,41 @@
           body: formData
         });
         if (response.status === 401) { logout(); return; }
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          showFail('❌ ' + (errData.detail || 'Upload rejected by server.'));
+          return;
+        }
 
         const data        = await response.json();
         const taskId      = data.task_id;
         const downloadUrl = data.download_url;
 
-        btn.textContent = '\ud83d\udd04 Translating\u2026';
+        btn.textContent = '🔄 Translating…';
 
         const socket = new WebSocket(`${window.API_CONFIG.WS_URL}/progress/${taskId}`);
         socket.onmessage = function (event) {
           const msg = JSON.parse(event.data);
           if (msg.progress < 0) {
-            status.textContent = '\u274c An error occurred. Please try again.';
-            status.className = 'error';
-            loader.style.display = 'none';
-            btn.disabled = false;
-            btn.innerHTML = '&#10024; Translate PDF';
-            socket.close(); return;
+            socket.close();
+            showFail('❌ Translation failed on the server. The document may be corrupted, password-protected, or too complex. Please try a different file.');
+            return;
           }
-          bar.style.width = msg.progress + '%';
+          bar.style.width    = msg.progress + '%';
           percent.textContent = msg.progress + '%';
           if (msg.progress >= 100) {
-            status.textContent = '\ud83c\udf89 Translation complete! Download starting\u2026';
-            status.className = 'success';
-            btn.innerHTML = '\u2705 Done!';
+            statusEl.textContent = '🎉 Translation complete! Download starting…';
+            statusEl.className   = 'success';
+            btn.innerHTML = '✅ Done!';
             window.location.href = downloadUrl;
             socket.close();
           }
         };
+        socket.onerror = function() {
+          showFail('❌ Lost connection to server. Please refresh the page and try again.');
+        };
       } catch (err) {
-        status.textContent = '\u274c Connection error. Is the server running?';
-        status.className = 'error';
-        btn.disabled = false;
-        btn.innerHTML = '&#10024; Translate PDF';
-        loader.style.display = 'none';
+        showFail('❌ Network error. Please check your connection and try again.');
       }
     }
   </script>

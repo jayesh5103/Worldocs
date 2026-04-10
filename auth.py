@@ -10,7 +10,7 @@ from models import User
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "d7bbad0708ee9213cb68d2b832de7ae47813522289d94acc1cce03400a2b8742")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 1 day
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 2   # 2 hours hard cap (frontend idle-timeout: 30 min)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")

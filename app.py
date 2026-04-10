@@ -1000,8 +1000,89 @@ def process_translation(input_path: str, language: str, task_id: str, file_key: 
         db.close()
 
 # ---------------------------
-# Translate PDF API Upload
+# DOCX Translation (Background)
 # ---------------------------
+
+def process_docx_translation(input_path: str, language: str, task_id: str, file_key: str):
+    """Translate a DOCX file paragraph-by-paragraph and upload to S3."""
+    import os
+    from docx import Document
+    from docx.shared import Pt
+    from database import SessionLocal
+    db = SessionLocal()
+    try:
+        doc = Document(input_path)
+        total_paras = len(doc.paragraphs)
+        output_path = f"translated_{task_id}.docx"
+
+        for i, para in enumerate(doc.paragraphs):
+            if para.text.strip():
+                translated = _translate_with_retry(para.text, language)
+                translated = _fix_punctuation(translated)
+                translated = _apply_glossary(translated, language)
+                # Preserve runs structure – replace first run, clear rest
+                if para.runs:
+                    para.runs[0].text = translated
+                    for run in para.runs[1:]:
+                        run.text = ""
+                else:
+                    para.text = translated
+            progress_store[task_id] = int(((i + 1) / max(total_paras, 1)) * 88)
+
+        doc.save(output_path)
+
+        # Upload translated DOCX to S3
+        progress_store[task_id] = 95
+        s3.upload_file(
+            output_path, BUCKET_NAME, file_key,
+            ExtraArgs={"ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        )
+
+        try:
+            os.remove(output_path)
+            os.remove(input_path)
+        except Exception:
+            pass
+
+        progress_store[task_id] = 100
+        print("[docx-translate] Translation complete!")
+
+        task_record = db.query(models.TranslationTask).filter(
+            models.TranslationTask.id == task_id).first()
+        if task_record:
+            task_record.status = "completed"
+            file_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": BUCKET_NAME, "Key": file_key},
+                ExpiresIn=3600 * 24 * 7,
+            )
+            task_record.download_url = file_url
+            db.commit()
+
+    except Exception as e:
+        import traceback
+        print(f"[docx-translate] Error: {e}")
+        traceback.print_exc()
+        progress_store[task_id] = -1
+        task_record = db.query(models.TranslationTask).filter(
+            models.TranslationTask.id == task_id).first()
+        if task_record:
+            task_record.status = "failed"
+            db.commit()
+    finally:
+        db.close()
+
+
+# ---------------------------
+# Translate PDF/DOCX API Upload
+# ---------------------------
+
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/octet-stream",
+}
 
 @app.post("/translate")
 async def translate_pdf(
@@ -1012,9 +1093,16 @@ async def translate_pdf(
     current_user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Validate file type
-    if file.content_type not in ("application/pdf", "application/octet-stream") and not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+    filename_lower = (file.filename or "").lower()
+    is_pdf  = filename_lower.endswith(".pdf")
+    is_docx = filename_lower.endswith(".docx")
+
+    # Strict file-type gate – only PDF and DOCX allowed
+    if not is_pdf and not is_docx:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Please upload a PDF (.pdf) or Word document (.docx) only."
+        )
 
     contents = await file.read()
 
@@ -1023,28 +1111,30 @@ async def translate_pdf(
     if len(contents) > MAX_SIZE:
         raise HTTPException(status_code=400, detail="File too large. Maximum allowed size is 20 MB.")
 
-    # Quick PDF magic-byte check
-    if not contents.startswith(b"%PDF"):
-        raise HTTPException(status_code=400, detail="Invalid PDF file.")
+    # Magic-byte validation
+    if is_pdf and not contents.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="Invalid PDF file. The file content does not match PDF format.")
+    if is_docx and not contents.startswith(b"PK"):  # DOCX/ZIP magic bytes
+        raise HTTPException(status_code=400, detail="Invalid DOCX file. The file content does not match Word format.")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp:
+    suffix  = ".pdf" if is_pdf else ".docx"
+    file_key_suffix = ".pdf" if is_pdf else ".docx"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
         temp.write(contents)
         input_path = temp.name
 
-    task_id = str(uuid.uuid4())
-    file_key = f"translated/{task_id}.pdf"
+    task_id  = str(uuid.uuid4())
+    file_key = f"translated/{task_id}{file_key_suffix}"
 
-    # generate secure initial download link
+    # Generate initial pre-signed download URL
     file_url = s3.generate_presigned_url(
         "get_object",
-        Params={
-            "Bucket": BUCKET_NAME,
-            "Key": file_key
-        },
+        Params={"Bucket": BUCKET_NAME, "Key": file_key},
         ExpiresIn=3600
     )
 
-    # Save initial task to DB
+    # Save initial task record to DB
     new_task = models.TranslationTask(
         id=task_id,
         user_id=current_user.id,
@@ -1055,13 +1145,23 @@ async def translate_pdf(
     db.add(new_task)
     db.commit()
 
-    background_tasks.add_task(
-        process_translation,
-        input_path=input_path,
-        language=language,
-        task_id=task_id,
-        file_key=file_key
-    )
+    # Dispatch to correct background worker
+    if is_docx:
+        background_tasks.add_task(
+            process_docx_translation,
+            input_path=input_path,
+            language=language,
+            task_id=task_id,
+            file_key=file_key
+        )
+    else:
+        background_tasks.add_task(
+            process_translation,
+            input_path=input_path,
+            language=language,
+            task_id=task_id,
+            file_key=file_key
+        )
 
     return {
         "task_id": task_id,

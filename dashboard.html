@@ -7,10 +7,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=1.2">
   <script src="config.js"></script>
   <style>
-    body { padding: 24px; justify-content: center; align-items: center; }
+    body { padding-top: 5vh; }
     .search-row {
       display: flex;
       align-items: center;
@@ -184,9 +184,49 @@
     }
     .email-section.open { display: block; }
     @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; } }
+
+    /* Session timeout banner */
+    #session-warning {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 9999;
+      background: linear-gradient(90deg,#f97316,#ef4444);
+      color: #fff;
+      text-align: center;
+      padding: 12px 20px;
+      font-size: 0.93rem;
+      font-weight: 600;
+      box-shadow: 0 4px 20px rgba(239,68,68,0.35);
+      animation: slideDown 0.3s ease;
+    }
+    #session-warning.show { display: block; }
+    #session-warning button {
+      margin-left: 14px;
+      background: rgba(255,255,255,0.25);
+      border: 1.5px solid rgba(255,255,255,0.6);
+      color: #fff;
+      font-weight: 700;
+      padding: 4px 14px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      width: auto;
+      display: inline-block;
+      transition: background 0.2s;
+    }
+    #session-warning button:hover { background: rgba(255,255,255,0.4); }
+    @keyframes slideDown { from{transform:translateY(-100%)} to{transform:none} }
   </style>
 </head>
 <body>
+  <!-- Session Timeout Warning Banner -->
+  <div id="session-warning">
+    ⏰ Your session expires in <strong id="session-countdown">5:00</strong> due to inactivity.
+    <button onclick="resetSessionTimer()">Stay Logged In</button>
+    <button onclick="logout()" style="background:rgba(0,0,0,0.2);">Logout Now</button>
+  </div>
+
   <div class="container wide">
     <div class="page-header">
       <div>
@@ -252,6 +292,43 @@
   <script>
     let allTasks = [];
     let currentFilter = 'all';
+
+    // ── Session Idle Timeout (30 min) ──────────────────────────────────
+    const SESSION_TIMEOUT_MS  = 30 * 60 * 1000;
+    const SESSION_WARN_BEFORE = 5  * 60 * 1000;
+    let _sessionTimer, _warnTimer, _warnCountdown;
+
+    function resetSessionTimer() {
+      clearTimeout(_sessionTimer);
+      clearTimeout(_warnTimer);
+      clearInterval(_warnCountdown);
+      document.getElementById('session-warning').classList.remove('show');
+      _warnTimer    = setTimeout(() => showSessionWarning(), SESSION_TIMEOUT_MS - SESSION_WARN_BEFORE);
+      _sessionTimer = setTimeout(() => logout(), SESSION_TIMEOUT_MS);
+    }
+
+    function showSessionWarning() {
+      document.getElementById('session-warning').classList.add('show');
+      let secs = SESSION_WARN_BEFORE / 1000;
+      const el = document.getElementById('session-countdown');
+      el.textContent = fmt(secs);
+      _warnCountdown = setInterval(() => {
+        secs--;
+        el.textContent = fmt(secs);
+        if (secs <= 0) { clearInterval(_warnCountdown); logout(); }
+      }, 1000);
+    }
+
+    function fmt(s) {
+      const m = Math.floor(s / 60), r = Math.floor(s % 60);
+      return `${m}:${String(r).padStart(2,'0')}`;
+    }
+
+    ['mousemove','keydown','click','scroll','touchstart'].forEach(ev =>
+      document.addEventListener(ev, resetSessionTimer, { passive: true })
+    );
+    resetSessionTimer();
+    // ─────────────────────────────────────────────────────────────────
 
     const langMap = {
       'en':'English','hi':'Hindi','mr':'Marathi','bn':'Bengali','gu':'Gujarati',
