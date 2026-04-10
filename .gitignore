@@ -32,3 +32,6 @@ package/
 # Logs
 server.log
 *.log
+worldocs
+worldocs.pub
+
