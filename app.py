@@ -172,11 +172,28 @@ import models
 import auth
 import email_utils
 
+from sqlalchemy import text
+
 # Create database tables if they do not exist
 try:
     models.Base.metadata.create_all(bind=engine)
+    
+    # Auto-upgrade schema if table exists but is missing newer columns (for existing Render deployments)
+    with engine.begin() as conn:
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR UNIQUE"))
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN reset_token VARCHAR"))
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN reset_token_expiry TIMESTAMP"))
+        except Exception:
+            pass
 except Exception as e:
-    print(f"Warning: Failed to create database tables. Error: {e}")
+    print(f"Warning: Failed to create/upgrade database tables. Error: {e}")
 
 app = FastAPI()
 
