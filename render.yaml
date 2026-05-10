@@ -19,6 +19,10 @@ services:
         value: smtp.gmail.com
       - key: ALLOWED_ORIGIN
         sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: worldocs-db
