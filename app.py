@@ -173,9 +173,40 @@ import auth
 import email_utils
 
 # Create database tables if they do not exist
-models.Base.metadata.create_all(bind=engine)
+try:
+    models.Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Warning: Failed to create database tables. Error: {e}")
 
 app = FastAPI()
+
+# Global exception handler to prevent HTML 500 errors
+from fastapi.responses import JSONResponse
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    error_msg = f"Internal Server Error: {str(exc)}"
+    print(f"Global Error: {error_msg}")
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": error_msg}
+    )
+
+from sqlalchemy import text
+
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    try:
+        # Check database connection
+        db.execute(text("SELECT 1"))
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": "disconnected", "error": str(e)}
+        )
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -240,10 +271,8 @@ async def progress_socket(websocket: WebSocket, task_id: str):
 # ---------------------------
 from fastapi.security import OAuth2PasswordRequestForm
 
-class UserCreate(auth.User):
-    pass # Pydantic model for validation (Wait, we need a Pydantic model)
-
 from pydantic import BaseModel, EmailStr
+
 class UserCreate(BaseModel):
     username: str
     email: str
@@ -251,17 +280,24 @@ class UserCreate(BaseModel):
 
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(
-        (models.User.username == user.username) | (models.User.email == user.email)
-    ).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Username or email already registered")
-    
-    hashed_password = auth.get_password_hash(user.password)
-    new_user = models.User(username=user.username, email=user.email, password_hash=hashed_password)
-    db.add(new_user)
-    db.commit()
-    return {"message": "User created successfully"}
+    try:
+        db_user = db.query(models.User).filter(
+            (models.User.username == user.username) | (models.User.email == user.email)
+        ).first()
+        if db_user:
+            raise HTTPException(status_code=400, detail="Username or email already registered")
+        
+        hashed_password = auth.get_password_hash(user.password)
+        new_user = models.User(username=user.username, email=user.email, password_hash=hashed_password)
+        db.add(new_user)
+        db.commit()
+        return {"message": "User created successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Registration Error: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="An error occurred during registration. Please try again.")
 
 @app.post("/login")
 @limiter.limit("10/minute")
